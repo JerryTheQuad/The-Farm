@@ -23,7 +23,7 @@
 ## Быстрый старт
 
 ```bash
-python Code.py run --config config.json
+python Code.py --config config.json
 ```
 
 ### Пример `config.json`
@@ -64,43 +64,7 @@ python Code.py run --config config.json
 ## Режим отладки (один проход)
 
 ```bash
-python Code.py run --config config.json --once
-```
-
-## Управление фидами без редактирования `config.json`
-
-Теперь можно хранить и менять список фидов через SQLite-команды:
-
-```bash
-# Добавить обычный RSS
-python Code.py add-feed --name "Habr" --feed-type rss --url "https://habr.com/ru/rss/all/all/?fl=ru"
-
-# Добавить YouTube
-python Code.py add-feed --name "OpenAI YouTube" --feed-type youtube --channel-id "UCXZCJLdBC09xxGZ6gcdrc6A"
-
-# Добавить Reddit
-python Code.py add-feed --name "Reddit Python" --feed-type reddit --subreddit Python
-
-# Показать список
-python Code.py list-feeds --all
-
-# Выключить/включить/удалить по ID
-python Code.py disable-feed --id 2
-python Code.py enable-feed --id 2
-python Code.py remove-feed --id 2
-```
-
-Если в базе есть фиды, бот использует их. Если база пустая — берёт фиды из `config.json`.
-
-## Docker (для back4app container deploy)
-
-В репозиторий добавлен `Dockerfile`.
-
-Пример локального запуска:
-
-```bash
-docker build -t rss-bot .
-docker run --rm -v "$(pwd)/config.json:/app/config.json" rss-bot
+python Code.py --config config.json --once
 ```
 
 ## Рекомендация для Android без сторонних сервисов
@@ -108,3 +72,4 @@ docker run --rm -v "$(pwd)/config.json:/app/config.json" rss-bot
 - Развернуть **свой ntfy-сервер**.
 - В приложении ntfy на Android подписаться на ваш topic на вашем домене.
 - Бот публикует уведомления напрямую на ваш сервер.
+
