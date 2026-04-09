@@ -21,14 +21,13 @@ import json
 import logging
 import sqlite3
 import subprocess
-import threading
 import time
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -74,94 +73,6 @@ class SeenStore:
             (item_id,),
         )
         self.conn.commit()
-
-
-class FeedStore:
-    """Persistent feed registry so users can manage feeds without editing config.json."""
-
-    def __init__(self, db_path: Path) -> None:
-        self.conn = sqlite3.connect(db_path)
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS feeds (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                type TEXT NOT NULL CHECK(type IN ('rss', 'youtube', 'reddit')),
-                url TEXT,
-                channel_id TEXT,
-                subreddit TEXT,
-                cookies TEXT,
-                enabled INTEGER NOT NULL DEFAULT 1
-            )
-            """
-        )
-        self.conn.commit()
-
-    def add_feed(self, feed: dict[str, Any]) -> int:
-        cur = self.conn.execute(
-            """
-            INSERT INTO feeds(name, type, url, channel_id, subreddit, cookies, enabled)
-            VALUES(?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                feed["name"],
-                feed["type"],
-                feed.get("url"),
-                feed.get("channel_id"),
-                feed.get("subreddit"),
-                feed.get("cookies"),
-                1 if feed.get("enabled", True) else 0,
-            ),
-        )
-        self.conn.commit()
-        return int(cur.lastrowid)
-
-    def list_feeds(self, enabled_only: bool = True) -> list[dict[str, Any]]:
-        if enabled_only:
-            rows = self.conn.execute(
-                """
-                SELECT id, name, type, url, channel_id, subreddit, cookies, enabled
-                FROM feeds
-                WHERE enabled = 1
-                ORDER BY id
-                """
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                """
-                SELECT id, name, type, url, channel_id, subreddit, cookies, enabled
-                FROM feeds
-                ORDER BY id
-                """
-            ).fetchall()
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            out.append(
-                {
-                    "id": row[0],
-                    "name": row[1],
-                    "type": row[2],
-                    "url": row[3],
-                    "channel_id": row[4],
-                    "subreddit": row[5],
-                    "cookies": row[6],
-                    "enabled": bool(row[7]),
-                }
-            )
-        return out
-
-    def set_enabled(self, feed_id: int, enabled: bool) -> bool:
-        cur = self.conn.execute(
-            "UPDATE feeds SET enabled = ? WHERE id = ?",
-            (1 if enabled else 0, feed_id),
-        )
-        self.conn.commit()
-        return cur.rowcount > 0
-
-    def delete_feed(self, feed_id: int) -> bool:
-        cur = self.conn.execute("DELETE FROM feeds WHERE id = ?", (feed_id,))
-        self.conn.commit()
-        return cur.rowcount > 0
 
 
 class Notifier:
@@ -463,86 +374,11 @@ def validate_feeds(feeds: Iterable[dict[str, Any]]) -> None:
             raise ValueError(f"feeds[{i}]: rss requires url")
 
 
-def parse_feed_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    feed: dict[str, Any] = {
-        "name": args.name,
-        "type": args.feed_type,
-        "url": args.url,
-        "channel_id": args.channel_id,
-        "subreddit": args.subreddit,
-        "cookies": args.cookies,
-        "enabled": True,
-    }
-    validate_feeds([feed])
-    return feed
-
-
-def start_health_server(host: str, port: int) -> ThreadingHTTPServer:
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
-            if self.path in ("/", "/health", "/healthz"):
-                payload = b"ok"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-            else:
-                self.send_response(404)
-                self.end_headers()
-
-        def log_message(self, format: str, *args: Any) -> None:
-            logging.debug("health-server: " + format, *args)
-
-    server = ThreadingHTTPServer((host, port), HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logging.info("Health server started at http://%s:%s", host, port)
-    return server
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Universal RSS bot")
     parser.add_argument("--config", default="config.json", help="Path to JSON config")
-    parser.add_argument("--db-path", default=None, help="Override db path (default from config or seen.db)")
-    parser.add_argument("--once", action="store_true", help="Run one iteration and exit (for default/run command)")
-    subparsers = parser.add_subparsers(dest="command")
-
-    run_parser = subparsers.add_parser("run", help="Run polling bot")
-    run_parser.add_argument("--config", help="Path to JSON config (overrides global --config)")
-    run_parser.add_argument("--db-path", help="Override db path (overrides global --db-path)")
-    run_parser.add_argument("--once", action="store_true", help="Run one iteration and exit")
-    run_parser.add_argument("--health-host", default="0.0.0.0", help="Health server bind host")
-    run_parser.add_argument("--health-port", type=int, default=None, help="Health server port (disabled if omitted)")
-
-    add_parser = subparsers.add_parser("add-feed", help="Add feed to database")
-    add_parser.add_argument("--name", required=True, help="Feed display name")
-    add_parser.add_argument("--feed-type", required=True, choices=["rss", "youtube", "reddit"])
-    add_parser.add_argument("--url", help="Feed URL for rss or custom reddit feed URL")
-    add_parser.add_argument("--channel-id", help="YouTube channel id (for feed-type=youtube)")
-    add_parser.add_argument("--subreddit", help="Subreddit name (for feed-type=reddit)")
-    add_parser.add_argument("--cookies", help="Optional Cookie header for anti-bot")
-
-    list_parser = subparsers.add_parser("list-feeds", help="List stored feeds")
-    list_parser.add_argument("--all", action="store_true", help="Show disabled feeds too")
-
-    disable_parser = subparsers.add_parser("disable-feed", help="Disable feed by id")
-    disable_parser.add_argument("--id", required=True, type=int)
-
-    enable_parser = subparsers.add_parser("enable-feed", help="Enable feed by id")
-    enable_parser.add_argument("--id", required=True, type=int)
-
-    remove_parser = subparsers.add_parser("remove-feed", help="Delete feed by id")
-    remove_parser.add_argument("--id", required=True, type=int)
-
-    import_parser = subparsers.add_parser(
-        "import-feeds-from-config",
-        help="Import feeds from config.json into DB once",
-    )
-    import_parser.add_argument("--replace", action="store_true", help="Delete existing feeds before import")
-
+    parser.add_argument("--once", action="store_true", help="Run one iteration and exit")
     args = parser.parse_args()
-    command = args.command or "run"
 
     logging.basicConfig(
         level=logging.INFO,
@@ -551,77 +387,21 @@ def main() -> None:
 
     cfg_path = Path(args.config)
     cfg = load_config(cfg_path)
-    db_path = Path(args.db_path or cfg.get("db_path", "seen.db"))
-    feed_store = FeedStore(db_path)
-
-    if command == "add-feed":
-        feed = parse_feed_from_args(args)
-        feed_id = feed_store.add_feed(feed)
-        print(f"Added feed #{feed_id}: {feed['name']}")
-        return
-
-    if command == "list-feeds":
-        feeds = feed_store.list_feeds(enabled_only=not args.all)
-        if not feeds:
-            print("No feeds found.")
-            return
-        for feed in feeds:
-            print(
-                f"#{feed['id']} | {'ENABLED' if feed['enabled'] else 'DISABLED'} | "
-                f"{feed['type']} | {feed['name']} | url={feed.get('url') or '-'} | "
-                f"channel_id={feed.get('channel_id') or '-'} | subreddit={feed.get('subreddit') or '-'}"
-            )
-        return
-
-    if command == "disable-feed":
-        if not feed_store.set_enabled(args.id, False):
-            raise SystemExit(f"Feed with id={args.id} not found")
-        print(f"Feed #{args.id} disabled")
-        return
-
-    if command == "enable-feed":
-        if not feed_store.set_enabled(args.id, True):
-            raise SystemExit(f"Feed with id={args.id} not found")
-        print(f"Feed #{args.id} enabled")
-        return
-
-    if command == "remove-feed":
-        if not feed_store.delete_feed(args.id):
-            raise SystemExit(f"Feed with id={args.id} not found")
-        print(f"Feed #{args.id} removed")
-        return
-
-    if command == "import-feeds-from-config":
-        validate_feeds(cfg["feeds"])
-        if args.replace:
-            ids = [f["id"] for f in feed_store.list_feeds(enabled_only=False)]
-            for feed_id in ids:
-                feed_store.delete_feed(feed_id)
-        for feed in cfg["feeds"]:
-            feed_store.add_feed(feed)
-        print(f"Imported {len(cfg['feeds'])} feeds from config")
-        return
-
     validate_feeds(cfg["feeds"])
+
+    db_path = Path(cfg.get("db_path", "seen.db"))
     interval = int(cfg.get("poll_interval_sec", 180))
     notifiers = build_notifiers(cfg)
-    feeds_from_db = feed_store.list_feeds(enabled_only=True)
-    active_feeds = feeds_from_db if feeds_from_db else cfg["feeds"]
 
     bot = RssBot(
-        feeds=active_feeds,
+        feeds=cfg["feeds"],
         notifiers=notifiers,
         store=SeenStore(db_path),
         poll_interval_sec=interval,
     )
 
-    health_port = getattr(args, "health_port", None)
-    if health_port is not None:
-        start_health_server(getattr(args, "health_host", "0.0.0.0"), int(health_port))
-
-    run_once = bool(getattr(args, "once", False))
-    if run_once:
-        for feed in active_feeds:
+    if args.once:
+        for feed in cfg["feeds"]:
             bot._process_feed(feed)
     else:
         bot.run_forever()
